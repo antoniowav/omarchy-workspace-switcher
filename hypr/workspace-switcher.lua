@@ -103,6 +103,14 @@ hl.gesture({ fingers = 3, direction = "down", action = swipe_action("down"), dis
 -- These ride the same stream the gestures do, which keeps the shell's flaky
 -- GlobalShortcut routing out of the path entirely. Lua-function binds survive
 -- config reloads natively and need no runtime rebind dance.
+--
+-- Unbind first: Hyprland keeps every bind registered for a key, so without
+-- this Omarchy's stock Super + Tab ("Next workspace") fires alongside ours and
+-- each press both jumps a workspace and opens the overview. (In the ALT
+-- arrangement this drops Omarchy's Alt + Tab window cycling, which is the
+-- point of moving the overview there.)
+hl.unbind(SWITCHER_MOD .. " + TAB")
+hl.unbind(SWITCHER_MOD .. " + SHIFT + TAB")
 hl.bind(SWITCHER_MOD .. " + Tab", function() key_write("next") end,
     { description = "Switch workspace (hold " .. SWITCHER_MOD .. ", release to commit)" })
 hl.bind(SWITCHER_MOD .. " + SHIFT + Tab", function() key_write("previous") end,

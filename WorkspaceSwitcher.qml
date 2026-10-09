@@ -321,7 +321,10 @@ Item {
         if (sheetReveal >= swipeCommitRatio) sheetReveal = 1
         else close()
       } else if (mode === "closing") {
-        if (sheetReveal <= swipeCommitRatio) close()
+        // Mirror of opening: 30 % of the travel commits either way (the
+        // sheet is then 70 % revealed). Comparing against the ratio itself
+        // made closing need 70 % of the travel.
+        if (sheetReveal <= 1 - swipeCommitRatio) close()
         else sheetReveal = 1
       } else {
         sheetReveal = opened ? 1 : 0
