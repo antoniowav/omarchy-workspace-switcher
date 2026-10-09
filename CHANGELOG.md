@@ -15,6 +15,7 @@ the table have their own commit.
 | 1.2.0 | `25821ad` | 2026-10-08 | finger-following 3F swipe, live settings, file-stream input |
 | 1.3.0 – 1.4.3 | `e3abd92` | 2026-10-09 | all input on one stream, overview muting, alpha-correct previews |
 | 1.4.4 | `6619e28` | 2026-10-09 | wiring ships with the plugin, stream moves to `$XDG_RUNTIME_DIR` |
+| 1.4.5 | `b29c9a2` | 2026-10-09 | no duplicate Super + Tab bind, symmetric swipe-to-close |
 
 ## Implementations (new since 1.0.0)
 
@@ -107,3 +108,9 @@ are recorded in the commit messages.
    to the correct shm path, which keeps the cheap dmabuf transport. The
    `QS_DISABLE_DMABUF=1` workaround this replaced is no longer needed and should
    not be set.
+10. **Super + Tab fired twice** (1.4.5) — the wiring bound `SUPER + Tab` without
+    unbinding Omarchy's stock "Next workspace" bind, and Hyprland keeps both, so
+    each press jumped a workspace and opened the overview. It now unbinds first.
+11. **Swipe-to-close needed 70 % of the travel** (1.4.5) — closing compared the
+    reveal against the commit ratio itself; it now closes at `1 - ratio`, so
+    both directions commit at 30 %.
