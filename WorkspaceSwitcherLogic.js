@@ -2,7 +2,9 @@
 // with node (test/logic-test.js).
 
 // Terminals are labelled by what they are doing, from the window title.
-var TERMINAL_CLASSES = ["foot", "footclient", "alacritty", "kitty", "com.mitchellh.ghostty"]
+var TERMINAL_CLASSES = ["foot", "footclient", "alacritty", "kitty", "com.mitchellh.ghostty",
+  "konsole", "org.kde.konsole", "gnome-terminal-server", "org.gnome.terminal",
+  "xterm", "wezterm", "org.wezfurlong.wezterm", "terminator"]
 
 function normalizeAddress(value) {
   var address = String(value || "").toLowerCase()
@@ -24,7 +26,15 @@ function appNameIndex(entries) {
     var name = String(entry.name || "")
     if (!name) continue
     if (entry.startupClass) index[String(entry.startupClass).toLowerCase()] = name
-    if (entry.id) index[String(entry.id).toLowerCase()] = name
+    if (entry.id) {
+      // Window classes never carry the ".desktop" suffix, so index the id
+      // without it; reverse-DNS ids ("org.gimp.GIMP") also answer to their
+      // last label, for windows whose class is just the basename ("gimp").
+      var idKey = String(entry.id).toLowerCase().replace(/\.desktop$/, "")
+      if (idKey) index[idKey] = name
+      var base = idKey.split(".").pop()
+      if (base && base !== idKey && index[base] === undefined) index[base] = name
+    }
     var url = String(entry.execString || "").match(/https?:\/\/([^\/"' ]+)/)
     if (url) index["web:" + url[1].toLowerCase().replace(/^www\./, "")] = name
   }
@@ -38,7 +48,7 @@ function appName(cls, index) {
     var domain = web[1].replace(/^www\./, "")
     return index["web:" + domain] || capitalize(domain.split(".")[0])
   }
-  if (lower === "soffice") return "LibreOffice"
+  if (lower === "soffice" || lower === "soffice.bin") return "LibreOffice"
   return index[lower] || index[lower.split(".").pop()] || capitalize(lower.split(".").pop())
 }
 
@@ -49,8 +59,17 @@ function windowLabel(cls, title, app) {
   if (TERMINAL_CLASSES.indexOf(String(cls || "").toLowerCase()) === -1) return app
   var text = String(title || "").trim()
   if (!text || text.toLowerCase() === String(cls).toLowerCase()) return app
+  // Terminals that append their own name to the title ("… — Konsole") lose it.
+  if (app) {
+    var tail = " — " + app
+    if (text.length > tail.length && text.slice(-tail.length).toLowerCase() === tail.toLowerCase())
+      text = text.slice(0, -tail.length).trim()
+  }
+  if (!text) return app
   var prompt = text.match(/^[^@\s]+@[^:\s]+:\s*(.+)$/)
-  return prompt ? prompt[1] : text
+  // The prompt's trailing $, # or % is shell decoration, not the directory.
+  if (prompt) return prompt[1].replace(/\s*[$#%]+$/, "") || app
+  return text
 }
 
 // Every workspace that has windows, plus the visible ones, sorted by id, each
@@ -87,6 +106,10 @@ function buildWorkspaces(state, names, waylandFor) {
     if (!ws) return
     var address = normalizeAddress(c.address)
     if (!address) return
+    // A client without usable geometry would poison the layout with NaN.
+    if (!Array.isArray(c.at) || !Array.isArray(c.size)
+      || typeof c.at[0] !== "number" || typeof c.at[1] !== "number"
+      || typeof c.size[0] !== "number" || typeof c.size[1] !== "number") return
     var app = appName(c.class || c.initialClass, names)
     ws.windows.push({
       address: address,
@@ -98,7 +121,10 @@ function buildWorkspaces(state, names, waylandFor) {
       w: c.size[0] / ws.monitor.w,
       h: c.size[1] / ws.monitor.h,
       floating: !!c.floating,
-      wayland: waylandFor ? (waylandFor(address) || null) : null
+      wayland: waylandFor ? (waylandFor(address) || null) : null,
+      // Filled in by assignCaptureOrder when the overview opens; -1 = not
+      // scheduled for a capture yet.
+      captureOrder: -1
     })
   })
 
@@ -130,41 +156,48 @@ function sortByRecent(workspaces, recent) {
   })
 }
 
-// The Lua run with `hyprctl eval` when the plugin loads, and again after every
-// config reload (which drops runtime bindings). Letting go of Super is a
-// release binding on each Super key that must see every release: transparent,
-// or Hyprland shadows it once Super + Tab has fired, so it never fires;
-// non_consuming, so apps still see Super; ignore_mods, so it fires with Shift
-// held too. It has no description, so it stays out of the keybindings list.
-function bindingScript(appId, owner) {
-  function global(name) { return 'hl.dsp.global("' + appId + ':' + name + '")' }
-  return [
-    'hl.unbind("SUPER + TAB")',
-    'hl.unbind("SUPER + SHIFT + TAB")',
-    'hl.unbind("SUPER + Super_L")',
-    'hl.unbind("SUPER + Super_R")',
-    'hl.bind("SUPER + TAB", ' + global("next") + ', { description = "Switch workspace (hold Super)" })',
-    'hl.bind("SUPER + SHIFT + TAB", ' + global("previous") + ', { description = "Switch workspace backwards (hold Super)" })',
-    'for _, key in ipairs({ "Super_L", "Super_R" }) do hl.bind("SUPER + " .. key, ' + global("commit")
-      + ', { release = true, transparent = true, non_consuming = true, ignore_mods = true }) end',
-    '_G.workspaceSwitcherBindingOwner = "' + owner + '"'
-  ].join("; ")
+// The cards in display order: plain number order when numericOrder is set,
+// otherwise order of visit. Same workspace objects, only the order differs,
+// so a selection computed in one order maps onto the other by identity.
+function displayOrder(workspaces, recent, numericOrder) {
+  if (numericOrder) return workspaces.slice().sort(function(a, b) { return a.id - b.id })
+  return sortByRecent(workspaces, recent)
 }
 
-// The Lua run when the plugin unloads: gives Super + Tab and Super + Shift +
-// Tab back to Omarchy's defaults, unless a newer instance has bound them since.
-function restoreScript(owner) {
-  return [
-    'if _G.workspaceSwitcherBindingOwner == "' + owner + '" then',
-    '_G.workspaceSwitcherBindingOwner = nil',
-    'hl.unbind("SUPER + TAB")',
-    'hl.unbind("SUPER + SHIFT + TAB")',
-    'hl.unbind("SUPER + Super_L")',
-    'hl.unbind("SUPER + Super_R")',
-    'hl.bind("SUPER + TAB", hl.dsp.focus({ workspace = "e+1" }), { description = "Next workspace" })',
-    'hl.bind("SUPER + SHIFT + TAB", hl.dsp.focus({ workspace = "e-1" }), { description = "Previous workspace" })',
-    'end'
-  ].join(" ")
+// The display position the overview opens with: the card Tab would reach from
+// the focused one in visit order (first Tab = last-visited workspace), mapped
+// onto however the cards are displayed. `ranked` is the visit-ordered list.
+function initialSelection(ranked, display, pendingSteps) {
+  var target = (ranked || [])[cycleSelection(0, pendingSteps, (ranked || []).length)]
+  return Math.max(0, (display || []).indexOf(target))
+}
+
+// Numbers the windows for the staggered capture pump: the focused workspace's
+// windows first (they are what the user is looking at), then the other cards
+// in display order. Every window gets exactly one slot; the return value is
+// how many captures the pump has to issue.
+function assignCaptureOrder(cards) {
+  var order = 0
+  var focusedFirst = (cards || []).slice().sort(function(a, b) {
+    return (b && b.focused ? 1 : 0) - (a && a.focused ? 1 : 0)
+  })
+  for (var i = 0; i < focusedFirst.length; ++i) {
+    var windows = focusedFirst[i] && focusedFirst[i].windows ? focusedFirst[i].windows : []
+    for (var j = 0; j < windows.length; ++j) windows[j].captureOrder = order++
+  }
+  return order
+}
+
+// How many windows can actually be captured: a window whose toplevel the shell
+// cannot resolve never reports preview content, so the preview wait must count
+// only the rest or it would always run out its full timeout.
+function countCaptureTargets(cards) {
+  var count = 0
+  for (var i = 0; i < (cards || []).length; ++i) {
+    var windows = cards[i] && cards[i].windows ? cards[i].windows : []
+    for (var j = 0; j < windows.length; ++j) if (windows[j].wayland) count += 1
+  }
+  return count
 }
 
 // Largest card width that fits n cards in the area, trying every column count.
@@ -185,6 +218,60 @@ function layoutFor(n, areaW, areaH, gap, labelHeight, cardAspect) {
 function moveSelection(index, dx, dy, cols, count) {
   var next = index + dx + dy * cols
   return next >= 0 && next < count ? next : index
+}
+
+// Settings from ~/.config/omarchy/workspace-switcher.json. Absent file,
+// missing keys or malformed JSON all fall back to the defaults (everything
+// on); "off" values revert that behavior to how the base plugin ships.
+// captureStaggerMs is how long the capture pump waits between two previews;
+// it is clamped to a sane range so a typo cannot stall the previews forever.
+function parseSettings(text) {
+  var out = { gestureOpen: true, accentTint: true, numericOrder: true, captureStaggerMs: 8, previewWaitMs: 0 }
+  if (!text) return out
+  try {
+    var data = JSON.parse(String(text))
+    if (data && typeof data.gestureOpen === "boolean") out.gestureOpen = data.gestureOpen
+    if (data && typeof data.accentTint === "boolean") out.accentTint = data.accentTint
+    if (data && typeof data.numericOrder === "boolean") out.numericOrder = data.numericOrder
+    if (data && typeof data.captureStaggerMs === "number" && isFinite(data.captureStaggerMs))
+      out.captureStaggerMs = Math.min(500, Math.max(0, Math.round(data.captureStaggerMs)))
+    if (data && typeof data.previewWaitMs === "number" && isFinite(data.previewWaitMs))
+      out.previewWaitMs = Math.min(1000, Math.max(0, Math.round(data.previewWaitMs)))
+  } catch (error) {
+    // malformed: keep defaults
+  }
+  return out
+}
+
+// One line of the input stream the Lua side in hyprland.lua writes to
+// /tmp/omarchy-workspace-switcher-swipe. Two kinds:
+//   "begin up" / "update up -123.45" / "end down [cancelled]" — gesture
+//     phases; `dy` is the finger travel accumulated by the Lua side (screen
+//     coordinates: swiping up makes it negative), present on updates only;
+//     "cancelled" marks a gesture the compositor aborted, which reverts
+//     instead of committing.
+//   "key next" — a key press from the Lua-function binds (next, previous,
+//     commit, toggle, close).
+function parseSwipe(line) {
+  var parts = String(line || "").trim().split(/\s+/)
+  if (parts.length < 2) return null
+  if (parts[0] === "key") {
+    if (["next", "previous", "commit", "toggle", "close"].indexOf(parts[1]) === -1) return null
+    return { phase: "key", name: parts[1] }
+  }
+  if (parts[0] !== "begin" && parts[0] !== "update" && parts[0] !== "end") return null
+  var event = { phase: parts[0], dir: parts[1] === "down" ? "down" : "up", dy: 0, cancelled: false }
+  if (parts[0] === "update") {
+    var dy = parseFloat(parts[2])
+    if (isNaN(dy)) return null
+    event.dy = dy
+  }
+  if (parts[0] === "end" && parts[2] === "cancelled") event.cancelled = true
+  return event
+}
+
+function clamp01(value) {
+  return value < 0 ? 0 : (value > 1 ? 1 : value)
 }
 
 // The card index after stepping through the cards in order, as Super + Tab
@@ -224,14 +311,19 @@ if (typeof module !== "undefined") {
     windowLabel: windowLabel,
     buildWorkspaces: buildWorkspaces,
     touchRecent: touchRecent,
-    bindingScript: bindingScript,
-    restoreScript: restoreScript,
     sortByRecent: sortByRecent,
+    displayOrder: displayOrder,
+    assignCaptureOrder: assignCaptureOrder,
+    countCaptureTargets: countCaptureTargets,
+    initialSelection: initialSelection,
     layoutFor: layoutFor,
     moveSelection: moveSelection,
     cycleSelection: cycleSelection,
     commitTarget: commitTarget,
     highlightIndex: highlightIndex,
-    pointerMoved: pointerMoved
+    pointerMoved: pointerMoved,
+    parseSettings: parseSettings,
+    parseSwipe: parseSwipe,
+    clamp01: clamp01
   }
 }

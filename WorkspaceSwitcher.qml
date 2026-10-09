@@ -11,13 +11,15 @@ import "WorkspaceSwitcherLogic.js" as Logic
 // as a card, in order of visit (current first), with its windows drawn at
 // their real positions as previews.
 //
-// While the plugin is loaded it binds Super + Tab to "next", Super + Shift +
-// Tab to "previous" and letting go of Super to "commit": the first Tab opens
-// the overview with the previous workspace selected, each further Tab moves to
-// the next most recent, and letting go of Super goes to the one selected, so a
-// quick Super + Tab flips between the last two. Unloading it gives Super + Tab
-// back to Omarchy's next/previous workspace. The "toggle" and "close" globals
-// are for anything else, such as touchpad gestures (see the README).
+// Input rides one stream: $XDG_RUNTIME_DIR/omarchy-workspace-switcher-swipe
+// (/tmp when the shell has no runtime dir), one line per
+// event, written by gesture callbacks and Lua-function key binds in
+// hyprland.lua (gesture phases as "begin/update/end" lines, keys as
+// "key next/previous/commit/toggle/close"). The plugin tails the file — no
+// runtime key takeover, nothing to restore on unload, and the shell's
+// GlobalShortcut routing (flaky on quickshell 0.2.1: per-instance dead
+// subsets) is never in the path. GlobalShortcuts are still registered as
+// secondary triggers where they work.
 // The logic lives in WorkspaceSwitcherLogic.js.
 Item {
   id: root
@@ -26,9 +28,6 @@ Item {
   property var manifest: null
 
   readonly property string appId: "io.github.antoniowav.workspace-switcher"
-  // Set when this instance binds the keys, so an older instance unloading
-  // later doesn't undo a newer one's bindings.
-  property string bindingOwner: ""
   property bool destroying: false
 
   property bool opened: false
@@ -55,6 +54,110 @@ Item {
   readonly property int labelHeight: Style.space(28)
   readonly property real cardAspect: 16 / 9
 
+  // Setting: wash the backdrop with a whisper of the theme's popup-border
+  // color (the edge on bluetooth/sound flyouts), so the overview feels part
+  // of the theme. Off = plain theme background. Light/dark follows the theme
+  // either way: every color here resolves from the active theme at runtime.
+  property bool accentTint: true
+
+  // Setting: cards always display in number order (1, 2, 3, …) instead of
+  // order of visit. Tap-Super+Tab still flips to the workspace you were on
+  // before — the highlight just starts there; further Tabs walk the cards
+  // as displayed. Off = cards follow order of visit, current first.
+  property bool numericOrder: true
+
+  // Setting: a three-finger swipe up opens the overview following the
+  // fingers (the same begin/update/end engine the horizontal workspace
+  // swipe uses), and up or down while it is open closes it the same way.
+  // The swipe itself is streamed by lines in hyprland.lua; off = the stream
+  // is ignored and the swipes do nothing (base behavior).
+  property bool gestureOpen: true
+
+  // Setting: how long the sheet may wait for its previews before revealing,
+  // in milliseconds. 0 reveals immediately and the previews fill in as they
+  // land (each capture is a round trip through the compositor, ~0.1-0.2 s);
+  // a larger value holds the sheet back until either every preview has
+  // content or the wait runs out, so the sheet appears already populated.
+  property int previewWaitMs: 0
+
+  // Setting: how long the capture pump waits between two window previews, in
+  // milliseconds (0 = every preview captures at once). Captures ride the cheap
+  // dmabuf path, so a small gap keeps the open animation smooth (measured 9 of
+  // ~10 samples either way) while the previews still start landing within
+  // ~0.1 s; only a shell forced onto the shm screencopy path (QS_DISABLE_DMABUF)
+  // needs the larger values, where each capture costs the compositor a full
+  // readback.
+  property int captureStaggerMs: 8
+
+  // Settings and input live in files, watched live:
+  //   ~/.config/omarchy/workspace-switcher.json  (the settings above)
+  //   $XDG_RUNTIME_DIR/omarchy-workspace-switcher-swipe   (one line per input event)
+  readonly property string settingsPath: Quickshell.env("HOME") + "/.config/omarchy/workspace-switcher.json"
+  // The input stream lives in the session runtime dir when there is one (it is
+  // 0700 and per-session, so no other local user or session can inject lines);
+  // /tmp stays as the fallback for a shell started without XDG_RUNTIME_DIR.
+  readonly property string swipeDir: Quickshell.env("XDG_RUNTIME_DIR") !== "" ? Quickshell.env("XDG_RUNTIME_DIR") : "/tmp"
+  readonly property string swipePath: swipeDir + "/omarchy-workspace-switcher-swipe"
+
+  // Preview captures are handed out by the pump below: captureCount is how
+  // many windows this open has, captureArmed how many of them may capture yet.
+  // Each capture rides the cheap dmabuf transport, but still costs the
+  // compositor an offscreen render and a texture import here, so they are
+  // spread over consecutive frames of the opening animation
+  // (captureStaggerMs) instead of landing in one; the previews appear as the
+  // sheet opens, within ~0.1-0.2 s.
+  property int captureArmed: 0
+  property int captureCount: 0
+  // Previews that have content, how many of them can have any (a window with
+  // no capturable toplevel never will), and whether the sheet may reveal yet
+  // (the previewWaitMs gate above; always true with the setting off).
+  property int captureLanded: 0
+  property int captureTargets: 0
+  property bool revealReady: true
+
+  // How far the overview is showing, 0 (hidden) to 1 (fully open). While a
+  // swipe drags it the value follows the fingers directly; otherwise it
+  // animates, so opens and closes glide.
+  property real sheetReveal: 0
+  // True while the fingers (not an animation) are dragging the sheet.
+  property bool swipeFollowing: false
+  // "" | "opening" | "closing" — what an in-progress swipe is doing.
+  property string swipeMode: ""
+  // Finger travel (in the swipe stream's units) that fully reveals the sheet.
+  readonly property real swipeTravel: 320
+  // A swipe that revealed less than this snaps back; more commits (30%).
+  readonly property real swipeCommitRatio: 0.3
+
+  onGestureOpenChanged: {
+    if (!gestureOpen && swipeFollowing) {
+      swipeFollowing = false
+      swipeMode = ""
+      sheetReveal = opened ? 1 : 0
+    }
+  }
+
+  // The sheet glides on its own, but never fights the fingers.
+  Behavior on sheetReveal {
+    enabled: !root.swipeFollowing
+    NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+  }
+  readonly property color backdropColor: {
+    var base = Color.background
+    if (!root.accentTint) return Qt.alpha(base, 0.88)
+    var b = Color.popups.border
+    return Qt.rgba(base.r + (b.r - base.r) * 0.15, base.g + (b.g - base.g) * 0.15,
+      base.b + (b.b - base.b) * 0.15, 0.88)
+  }
+
+  // Window previews composite over this bed. Transparent terminals stay
+  // readable in light themes because the bed stays dark there; in dark themes
+  // it is the theme surface itself. Opaque windows cover it fully.
+  readonly property color previewBed: {
+    var bg = Color.menu.background
+    var luminance = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b
+    return luminance > 0.5 ? "#101315" : bg
+  }
+
   function focusedScreen() {
     var monitorName = Hyprland.focusedMonitor ? String(Hyprland.focusedMonitor.name || "") : ""
     var screens = Quickshell.screens || []
@@ -68,6 +171,7 @@ Item {
   function open() {
     targetScreen = focusedScreen()
     queryWanted = true
+    queryWatchdog.restart()
     if (!stateQuery.running)
       stateQuery.running = true
   }
@@ -78,12 +182,16 @@ Item {
       return
     }
     cycling = false
+    // A query that failed earlier may have left these behind; they would
+    // turn this open into a silent workspace switch instead of the overview.
+    commitPending = false
+    pendingSteps = 0
     open()
   }
 
-  // Super + Tab (step 1) and Super + Shift + Tab (step -1). The first one opens
-  // the overview with the previous workspace (or, backwards, the least recent)
-  // already selected, so a quick Super + Tab flips between the last two.
+  // Super + Tab (step 1) and Super + Shift + Tab (step -1). The first one
+  // opens the overview with the previous workspace (or, backwards, the least
+  // recent) already selected, so a quick Super + Tab flips between the last two.
   function cycle(step) {
     cycling = true
     if (opened) {
@@ -118,10 +226,25 @@ Item {
     opened = false
     workspaces = []
     queryWanted = false
+    queryWatchdog.stop()
     cycling = false
     pendingSteps = 0
     commitPending = false
     hoveredIndex = -1
+    selectedIndex = 0
+    captureArmed = 0
+    captureCount = 0
+    captureLanded = 0
+    captureTargets = 0
+    revealReady = true
+    previewWait.stop()
+    // The fingers' authority ends with the overview: swipe lines still in
+    // flight are ignored once swipeFollowing is false, so closing can never
+    // again leave a half-revealed sheet — or its input-stealing layer —
+    // behind, whatever route the close took.
+    swipeFollowing = false
+    swipeMode = ""
+    sheetReveal = 0
   }
 
   function pointerOver(index, position) {
@@ -140,6 +263,75 @@ Item {
     if (hoveredIndex === index) hoveredIndex = -1
   }
 
+  // One line of the input stream (see Logic.parseSwipe): gesture phases from
+  // the Lua gesture callbacks, key presses from the Lua-function binds. Keys
+  // act whatever gestureOpen says (that setting only governs swipes); a
+  // gesture the compositor cancelled (finger count changed mid-swipe and the
+  // like) reverts instead of committing.
+  function onSwipeLine(line) {
+    var event = Logic.parseSwipe(line)
+    if (!event) return
+
+    if (event.phase === "key") {
+      if (event.name === "next") cycle(1)
+      else if (event.name === "previous") cycle(-1)
+      else if (event.name === "commit") commit()
+      else if (event.name === "toggle") toggle()
+      else if (event.name === "close") close()
+      return
+    }
+    if (!gestureOpen) return
+
+    if (event.phase === "begin") {
+      if (swipeFollowing) return
+      if (opened) {
+        swipeMode = "closing"
+      } else if (event.dir === "up") {
+        swipeMode = "opening"
+        cycling = false
+        commitPending = false
+        pendingSteps = 0
+        sheetReveal = 0
+        open()
+      } else {
+        // A downward swipe from closed has nothing to reveal. Ignoring it
+        // keeps the panel — and with it the exclusive-keyboard layer and the
+        // shortcuts inhibitor — from being mapped, invisible and input-dead,
+        // for the whole length of the drag.
+        return
+      }
+      swipeFollowing = true
+    } else if (event.phase === "update" && swipeFollowing) {
+      if (swipeMode === "opening") {
+        // Up is negative dy in screen coordinates.
+        sheetReveal = Logic.clamp01(-event.dy / swipeTravel)
+      } else if (swipeMode === "closing") {
+        sheetReveal = Logic.clamp01(1 - Math.abs(event.dy) / swipeTravel)
+      }
+    } else if (event.phase === "end" && swipeFollowing) {
+      swipeFollowing = false
+      var mode = swipeMode
+      swipeMode = ""
+      if (event.cancelled) {
+        if (mode === "opening") close()
+        else sheetReveal = opened ? 1 : 0
+        return
+      }
+      if (mode === "opening") {
+        if (sheetReveal >= swipeCommitRatio) sheetReveal = 1
+        else close()
+      } else if (mode === "closing") {
+        // Mirror of opening: 30 % of the travel commits either way (the
+        // sheet is then 70 % revealed). Comparing against the ratio itself
+        // made closing need 70 % of the travel.
+        if (sheetReveal <= 1 - swipeCommitRatio) close()
+        else sheetReveal = 1
+      } else {
+        sheetReveal = opened ? 1 : 0
+      }
+    }
+  }
+
   function dispatch(lua) {
     close()
     Qt.callLater(function() {
@@ -148,7 +340,14 @@ Item {
   }
 
   function goToWorkspace(ws) {
-    dispatch('hl.dsp.focus({ workspace = "' + ws.id + '" })')
+    // Workspace ids come from hyprctl's JSON; only a finite number ever reaches
+    // the Lua expression (a window address is regex-validated in the logic).
+    var id = ws ? Number(ws.id) : NaN
+    if (!isFinite(id)) {
+      close()
+      return
+    }
+    dispatch('hl.dsp.focus({ workspace = "' + id + '" })')
   }
 
   function focusWindow(address) {
@@ -156,6 +355,7 @@ Item {
   }
 
   function finishQuery(text) {
+    queryWatchdog.stop()
     if (!queryWanted) return
     queryWanted = false
 
@@ -164,6 +364,7 @@ Item {
       state = JSON.parse(String(text || "{}"))
     } catch (error) {
       console.warn("io.github.antoniowav.workspace-switcher: failed to parse hyprctl output:", error)
+      close()
       return
     }
 
@@ -180,11 +381,14 @@ Item {
       var top = toplevelByAddress[address]
       return top ? top.wayland : null
     })
-    if (list.length === 0) return
-    list = Logic.sortByRecent(list, recent)
+    if (list.length === 0) {
+      close()
+      return
+    }
+    var ranked = Logic.sortByRecent(list, recent)
+    list = Logic.displayOrder(list, recent, root.numericOrder)
 
-    var selected = Logic.cycleSelection(Math.max(0, list.findIndex(function(ws) { return ws.focused })),
-      pendingSteps, list.length)
+    var selected = Logic.initialSelection(ranked, list, pendingSteps)
     pendingSteps = 0
     if (commitPending) {
       var target = Logic.commitTarget(true, list, selected)
@@ -193,12 +397,26 @@ Item {
       return
     }
 
+    // Number the previews for the capture pump (focused workspace first, then
+    // the cards as displayed) before the cards are built, so every delegate
+    // reads its final slot on its first evaluation; captures then start with
+    // the pump, as soon as the cards exist.
+    captureCount = Logic.assignCaptureOrder(list)
+    captureTargets = Logic.countCaptureTargets(list)
+    captureArmed = root.captureStaggerMs > 0 ? 0 : captureCount
+    captureLanded = 0
+    previewWait.stop()
+    revealReady = root.previewWaitMs <= 0 || captureTargets === 0
+    if (!revealReady) previewWait.restart()
     workspaces = list
     selectedIndex = selected
     hoveredIndex = -1
     pointerStart = null
     pointerArmed = false
     opened = true
+    // While a swipe is dragging the sheet, the fingers own the reveal; with
+    // the preview wait on, the reveal is held back until revealReady.
+    if (!swipeFollowing && revealReady) sheetReveal = 1
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -211,39 +429,23 @@ Item {
     recent = Logic.touchRecent(recent, Hyprland.focusedWorkspace ? Hyprland.focusedWorkspace.id : -1)
   }
 
-  function applyBindings() {
-    if (destroying) return
-    bindingOwner = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2)
-    Quickshell.execDetached(["hyprctl", "eval", Logic.bindingScript(appId, bindingOwner)])
-  }
-
-  function restoreBindings() {
-    if (!bindingOwner) return
-    Quickshell.execDetached(["hyprctl", "eval", Logic.restoreScript(bindingOwner)])
-  }
-
   Component.onCompleted: {
     noteFocusedWorkspace()
-    applyBindings()
+    // The input stream file must exist before tail can follow it; the gesture
+    // lines in hyprland.lua (re)create it on every swipe anyway. The retry
+    // starts the tail after the touch has had a moment to land.
+    Quickshell.execDetached(["touch", swipePath])
+    swipeWatchRetry.start()
+  }
+
+  Timer {
+    id: swipeWatchRetry
+    interval: 400
+    onTriggered: swipeTail.running = true
   }
 
   Component.onDestruction: {
     destroying = true
-    restoreBindings()
-  }
-
-  // A config reload rebuilds the bindings from the config files, dropping ours.
-  Connections {
-    target: Hyprland
-    function onRawEvent(event) {
-      if (event && event.name === "configreloaded") rebindTimer.restart()
-    }
-  }
-
-  Timer {
-    id: rebindTimer
-    interval: 500
-    onTriggered: root.applyBindings()
   }
 
   // Fires on workspace and monitor focus changes alike. A visit counts once
@@ -258,6 +460,131 @@ Item {
     id: visitTimer
     interval: 200
     onTriggered: root.noteFocusedWorkspace()
+  }
+
+  // The settings. The parse is a binding on the FileView's text, so it re-runs
+  // whenever the file reloads (FileView's onLoaded only fires on the first
+  // load — it is a property-change handler, not the signal). A missing file or
+  // malformed JSON means the defaults above (both settings features on).
+  property var settings: Logic.parseSettings(settingsFile.text())
+  onSettingsChanged: {
+    gestureOpen = settings.gestureOpen
+    accentTint = settings.accentTint
+    numericOrder = settings.numericOrder
+    captureStaggerMs = settings.captureStaggerMs
+    previewWaitMs = settings.previewWaitMs
+  }
+
+  FileView {
+    id: settingsFile
+    path: root.settingsPath
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+  }
+
+  // The input stream written (appended) by the gesture callbacks and the
+  // Lua-function key binds in hyprland.lua, tailed live: each appended line
+  // is one event, in order. The file is emptied by the plugin after input
+  // has been idle for a moment — truncating in place there is what `tail
+  // -f` can see, unlike rewrites. If the tail dies the stream is dead and
+  // every gesture after it would be silently lost, so it is respawned (the
+  // swipe file is touched first: a tail on a missing file exits immediately).
+  Process {
+    id: swipeTail
+    command: ["tail", "-n", "0", "-f", root.swipePath]
+    running: false
+    onExited: {
+      if (root.destroying) return
+      Quickshell.execDetached(["touch", root.swipePath])
+      swipeWatchRetry.start()
+    }
+    stdout: SplitParser {
+      onRead: function(line) {
+        root.onSwipeLine(line)
+        // Ids resolve lexically, not as root properties: root.swipeIdle is
+        // undefined and the call silently kills the rest of this handler.
+        swipeIdle.restart()
+        swipeWatchdog.restart()
+      }
+    }
+  }
+
+  // If the stream stops mid-gesture — the tail dies, the Lua write fails —
+  // the fingers' authority must not outlive the gesture: this long after the
+  // last line, the sheet reverts (never commits), so an interrupted follow
+  // can't leave the exclusive-keyboard layer mapped and the input dead.
+  Timer {
+    id: swipeWatchdog
+    interval: 5000
+    running: root.swipeFollowing
+    onTriggered: {
+      if (!root.swipeFollowing) return
+      root.swipeFollowing = false
+      var mode = root.swipeMode
+      root.swipeMode = ""
+      if (mode === "opening") root.close()
+      else root.sheetReveal = root.opened ? 1 : 0
+    }
+  }
+
+  Timer {
+    id: swipeIdle
+    interval: 3000
+    onTriggered: swipeTruncate.running = true
+  }
+
+  // Hands the previews their capture source, one window per tick (or all at
+  // once with captureStaggerMs 0): captures are cheap on the dmabuf path, but
+  // spreading them over the open animation's frames keeps the animation smooth
+  // (at 8 ms the live reveal renders 9 of ~10 possible samples with gaps of
+  // 25-37 ms; landing everything in one frame gives bigger gaps and hatches
+  // it). A sheet the fingers are dragging closed takes no new captures at all.
+  // The pump stops at captureCount and close() resets it, so a cancelled open
+  // cannot leave it running.
+  Timer {
+    id: capturePump
+    interval: root.captureStaggerMs
+    repeat: true
+    running: root.opened && root.swipeMode !== "closing"
+      && root.captureArmed < root.captureCount
+    onTriggered: root.captureArmed += 1
+  }
+
+  // The preview wait: reveals as soon as every preview has content, or when
+  // previewWaitMs runs out, whichever comes first.
+  Timer {
+    id: previewWait
+    interval: root.previewWaitMs
+    onTriggered: root.revealReady = true
+  }
+
+  onRevealReadyChanged: {
+    if (root.revealReady && root.opened && !root.swipeFollowing) root.sheetReveal = 1
+  }
+
+  // A state query that never comes back — the compositor busy, the process
+  // killed — must not leave the switcher wedged with queryWanted set, where
+  // the next Super + Tab only queues steps and nothing ever appears.
+  Timer {
+    id: queryWatchdog
+    interval: 2000
+    onTriggered: {
+      if (!root.queryWanted) return
+      console.warn("io.github.antoniowav.workspace-switcher: hyprctl state query timed out")
+      root.close()
+      stateQuery.running = false
+    }
+  }
+
+  // Empties the swipe stream in place, 3s after the last line of a gesture:
+  // `truncate -s 0`, never a rewrite — the tail sees the shrink and resets,
+  // while a replaced file would leave it watching a dead inode. (A FileView
+  // with setText("") was tried here first and never wrote the file at all.)
+  Process {
+    id: swipeTruncate
+    command: ["truncate", "-s", "0", root.swipePath]
+    running: false
   }
 
   Process {
@@ -294,12 +621,12 @@ Item {
     onPressed: root.cycle(-1)
   }
 
-  // Hyprland sends this one from a release binding, as a release.
+  // Hyprland sends this one from a release binding, as a release; commit() is
+  // idempotent, so handling the release alone is enough.
   GlobalShortcut {
     appid: "io.github.antoniowav.workspace-switcher"
     name: "commit"
     description: "Go to the selected workspace if Super + Tab opened the overview"
-    onPressed: root.commit()
     onReleased: root.commit()
   }
 
@@ -307,14 +634,15 @@ Item {
     appid: "io.github.antoniowav.workspace-switcher"
     name: "close"
     description: "Close the workspace overview"
-    onPressed: {
-      if (root.opened) root.close()
-    }
+    // Unconditional: close() is idempotent, and a half-revealed sheet (opened
+    // by a gesture whose query hasn't finished) has opened=false but must
+    // still be closable from outside.
+    onPressed: root.close()
   }
 
   PanelWindow {
     id: panel
-    visible: root.opened
+    visible: root.opened || root.swipeFollowing || root.sheetReveal > 0.001
     onVisibleChanged: {
       if (visible) keyCatcher.forceActiveFocus()
     }
@@ -327,9 +655,23 @@ Item {
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
     exclusionMode: ExclusionMode.Ignore
 
+    // While the overview shows, it holds a keyboard-shortcuts inhibitor on
+    // its surface: Hyprland then skips every keybind, mousebind and trackpad
+    // gesture for the focused surface (KeybindManager.cpp / TrackpadGestures
+    // gestureUpdate), so Super+digit workspace jumps, Super+Ctrl+arrows and
+    // the 3-finger horizontal workspace swipe can't change the desktop under
+    // the overview. The overview's own input is unaffected: Esc/arrows/Return
+    // arrive as plain keys, Tab and letting go of Super are handled below,
+    // and the open/close swipes register disable_inhibit in hyprland.lua.
+    ShortcutInhibitor {
+      window: panel
+      enabled: panel.visible
+    }
+
     Rectangle {
       anchors.fill: parent
-      color: Qt.alpha(Color.background, 0.88)
+      color: root.backdropColor
+      opacity: root.sheetReveal
     }
 
     // Clicking the backdrop closes the overview.
@@ -354,6 +696,38 @@ Item {
         case Qt.Key_Enter:
           if (root.workspaces[root.highlighted]) root.goToWorkspace(root.workspaces[root.highlighted])
           break
+        // With the shortcuts inhibitor up, Super + Tab (further presses while
+        // the overview is open) and Shift + Tab arrive here as plain keys —
+        // cycle the same way the stream binds do from closed. Shift + Tab
+        // actually arrives as Backtab (XKB maps it to ISO_Left_Tab, Qt to
+        // Qt.Key_Backtab, measured: key 16777218), so it needs its own case or
+        // the backwards walk is dead while the overview is open, where the
+        // stream bind is muted. Alt + Tab and Ctrl + Tab are left alone: those
+        // are window/app-level bindings (Alt + Tab cycles windows) and moving
+        // the workspace highlight under the overview would be surprising.
+        case Qt.Key_Tab:
+          if (event.modifiers & (Qt.AltModifier | Qt.ControlModifier)) return
+          root.cycle(event.modifiers & Qt.ShiftModifier ? -1 : 1)
+          break
+        case Qt.Key_Backtab:
+          root.cycle(-1)
+          break
+        default: return
+        }
+        event.accepted = true
+      }
+
+      Keys.onReleased: function(event) {
+        switch (event.key) {
+        // Letting go of Super commits, as the release bind does when the
+        // overview was opened from closed (the inhibitor has it muted now).
+        // The Super keysym arrives as Qt.Key_Meta on Linux (XKB Super->Meta
+        // mapping); the others cover different keyboard/mapping variants.
+        case Qt.Key_Meta:
+        case Qt.Key_Super_L:
+        case Qt.Key_Super_R:
+          root.commit()
+          break
         default: return
         }
         event.accepted = true
@@ -364,6 +738,8 @@ Item {
       id: area
       anchors.fill: parent
       anchors.margins: Style.space(48)
+      opacity: root.sheetReveal
+      scale: 0.92 + 0.08 * root.sheetReveal
 
       readonly property var fit: Logic.layoutFor(root.workspaces.length, width, height, root.gap, root.labelHeight, root.cardAspect)
 
@@ -382,6 +758,9 @@ Item {
             required property int index
             required property var modelData
 
+            // Preview content is counted once for the preview wait, even if a
+            // capture context is ever torn down and rebuilt.
+            property bool counted: false
             readonly property bool selected: index === root.highlighted
             width: area.fit.cardW
             height: width / root.cardAspect + root.labelHeight
@@ -472,7 +851,11 @@ Item {
                     width: Math.max(8, modelData.w * screenArea.width)
                     height: Math.max(8, modelData.h * screenArea.height)
                     radius: Math.max(2, Style.cornerRadius / 2)
-                    color: Qt.alpha(Color.menu.text, 0.08)
+                    // Solid while the preview is missing, so windows without
+                    // screencopy content read as tiles instead of holes;
+                    // near-clear under a live preview, where the bed behind
+                    // it does the compositing.
+                    color: preview.hasContent ? Qt.alpha(Color.menu.text, 0.08) : Color.menu.background
                     border.width: 1
                     border.color: winMouse.containsMouse ? Color.accent : Qt.alpha(Color.menu.text, 0.18)
                     clip: true
@@ -490,16 +873,49 @@ Item {
                       font.pixelSize: Style.font.caption
                     }
 
+                    // Opaque bed directly under the live preview, so transparent
+                    // windows (terminals with a see-through background) read
+                    // as solid tiles instead of ghosts. Hidden without content,
+                    // where the app-name placeholder shows instead.
+                    Rectangle {
+                      anchors.fill: preview
+                      visible: preview.hasContent
+                      color: root.previewBed
+                    }
+
                     ScreencopyView {
                       id: preview
                       anchors.fill: parent
                       anchors.margins: 1
-                      captureSource: root.opened && win.modelData.wayland ? win.modelData.wayland : null
+                      // null until the capture pump reaches this window.
+                      captureSource: win.modelData.captureOrder >= 0
+                          && win.modelData.captureOrder < root.captureArmed
+                          && win.modelData.wayland ? win.modelData.wayland : null
                       paintCursor: false
-                      // One frame per open keeps the overview cheap.
+                      // One frame per open, handed over by the capture pump above.
                       live: false
+                      // quickshell 0.2.1 wraps a dmabuf capture without the
+                      // texture's alpha flag (QSGOpenGLTexture::fromNative
+                      // takes no TextureHasAlphaChannel), so the capture would
+                      // be drawn unblended and a translucent window's
+                      // transparent pixels would punch a hole through the
+                      // whole panel surface. An item opacity below 1 makes the
+                      // scene graph blend the capture instead, 0.5% of the bed
+                      // mixing in where the window is transparent — measured
+                      // pixel-identical to the shm path for a 45%-opacity
+                      // blurred window, and ~45 ms earlier than routing the
+                      // capture through a layer (which is the other way to get
+                      // a blended composite). The real fix belongs upstream:
+                      // pass QQuickWindow::TextureHasAlphaChannel for alpha
+                      // dmabuf formats.
+                      opacity: hasContent ? 0.995 : 0
+                      onHasContentChanged: {
+                        if (!hasContent || card.counted) return
+                        card.counted = true
+                        root.captureLanded += 1
+                        if (root.captureLanded >= root.captureTargets) root.revealReady = true
+                      }
                       constraintSize: Qt.size(Math.max(1, width), Math.max(1, height))
-                      opacity: hasContent ? 1 : 0
                     }
 
                     // App name on every window, so tiled windows can be told apart.
