@@ -1,28 +1,7 @@
 # Workspace Switcher
 
-Reworked "omarchy-workspace-switcher" from author antoniowav
-
-Additional implementations:
-- Now activates on a touchpad 3F swipe up on top of other shortcuts
-- Window order now 1, 2, 3, 4 etc. instead of current workspace first
-- Bound to super + tab/super + shift + tab instead of alt - made sense since the workspaces manager key is already super
-- Applied current theme tint to overview background
-- Live setting file: running shell picks up files edit instantly with no need to restart it
-- etc.
-
-Bugfixes:
-- Changing workspaces with swipes & keyboard shortcuts while in overview - disabled
-- Windows with transparent/blurred background were appearing as 0 blur 0 opacity in overview - fixed
-- Silent workspace teleport - fixed
-- Wrong app names & terminal labels - fixed
-- etc.
-
-(find all in CHANGELOG.md)
-
-Super + Tab for Omarchy workspaces.
-
-Fork of [antoniowav/omarchy-workspace-switcher](https://github.com/antoniowav/omarchy-workspace-switcher),
-rebound to Super + Tab so Alt + Tab stays free for window cycling.
+Super + Tab for Omarchy workspaces, with a three-finger swipe that opens the
+overview under your fingers.
 
 - **Tap Super + Tab** to flip to the workspace you were on before. Tap it again to flip back.
 - **Hold Super and press Tab** to see every workspace — number order by default,
@@ -61,7 +40,7 @@ rebound to Super + Tab so Alt + Tab stays free for window cycling.
 Two steps: add the plugin, then include its Hyprland wiring (one `dofile`).
 
 ```bash
-omarchy plugin add https://github.com/IsseyShiitake/omarchy-workspace-switcher --enable
+omarchy plugin add https://github.com/antoniowav/omarchy-workspace-switcher --enable
 ```
 
 In `~/.config/hypr/hyprland.lua` (or an `input.lua` included from it):
@@ -270,24 +249,26 @@ Not verified by testing — reasoned from source, or untested hardware:
 - **Hold-`Super` Tab-repeat through the overview's exclusive-keyboard layer.**
   Discrete synthetic presses work; a real key repeat has not been measured. If
   repeats don't reach the layer on some setup, hold-cycling degrades to one step
-  per press (the stream binds used while closed are unaffected). - **Super-
-  release commit** depends on Qt mapping the XKB Super keysym to `Qt.Key_Meta`;
-  `Meta`, `Super_L` and `Super_R` are all handled, but only this Qt build was
-  exercised. - **Other trackpads** — `swipeTravel` (320 px) and the 30 % commit
-  threshold were tuned on this one. Nothing breaks elsewhere; the feel differs.
-  - **Other versions** — quickshell ≠ 0.2.1, Hyprland ≠ 0.56.2 and non-Omarchy
+  per press (the stream binds used while closed are unaffected).
+- **Super-release commit** depends on Qt mapping the XKB Super keysym to
+  `Qt.Key_Meta`; `Meta`, `Super_L` and `Super_R` are all handled, but only this
+  Qt build was exercised.
+- **Other trackpads** — `swipeTravel` (320 px) and the 30 % commit threshold
+  were tuned on this one. Nothing breaks elsewhere; the feel differs.
+- **Other versions** — quickshell ≠ 0.2.1, Hyprland ≠ 0.56.2 and non-Omarchy
   shells are untested. The plugin imports `qs.Commons`/`qs.Ui`, so it is
   Omarchy-only by design; the wiring file depends on 0.56's `gesture` keyword
-  and its `finish` release callback. - **Multi-monitor** — the overview targets
-  the focused monitor and the geometry maths is per-monitor, but only a single-
-  monitor setup was exercised. Special (negative-id) workspaces and
-  unmapped/hidden clients are excluded by design, and a client whose monitor is
-  missing from `hyprctl` falls back to a 1920×1080 fraction grid. - **Plugin
-  code changes need a shell restart** — Omarchy's plugin watcher exists, but it
-  did not reload this plugin for a file edit during testing. - **`omarchy plugin
-  update` overwrites a modified checkout** — this fork lives as a git checkout
-  under `~/.config/omarchy/plugins/`, so keep changes committed and pushed
-  rather than edited in place.
+  and its `finish` release callback.
+- **Multi-monitor** — the overview targets the focused monitor and the geometry
+  maths is per-monitor, but only a single-monitor setup was exercised. Special
+  (negative-id) workspaces and unmapped/hidden clients are excluded by design,
+  and a client whose monitor is missing from `hyprctl` falls back to a
+  1920×1080 fraction grid.
+- **Plugin code changes need a shell restart** — Omarchy's plugin watcher
+  exists, but it did not reload this plugin for a file edit during testing.
+- **`omarchy plugin update` overwrites a modified checkout** — the plugin lives
+  as a git checkout under `~/.config/omarchy/plugins/`, so keep changes
+  committed and pushed rather than edited in place.
 
 The alpha note under Requirements is specific to quickshell 0.2.1: if a future
 version passes the texture's alpha flag itself, this plugin's workaround becomes
@@ -305,8 +286,14 @@ deleted with the session and would simply be ignored.
 
 ## Changes
 
-Every implementation and every inherited bugfix this fork carries is listed in
+Every implementation and bugfix since 1.0.0 is listed in
 [CHANGELOG.md](CHANGELOG.md), with the version each landed in.
+
+## Thanks
+
+Versions 1.1.0–1.4.4 — the finger-following swipe, the input stream, overview
+muting, alpha-correct previews and the bugfixes in the changelog — were
+contributed by [IsseyShiitake](https://github.com/IsseyShiitake).
 
 ## Development
 

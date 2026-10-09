@@ -1,23 +1,22 @@
 # Changelog
 
-This is a fork of
-[antoniowav/omarchy-workspace-switcher](https://github.com/antoniowav/omarchy-workspace-switcher)
-(upstream 1.0.0, commits `ee12dfa` / `92a5c73`). Everything below is either new
-on top of that upstream release or a fix for a defect in it.
+Everything below is new on top of the 1.0.0 release (commits `ee12dfa` /
+`92a5c73`) or a fix for a defect in it. Versions 1.1.0–1.4.4 were developed by
+[IsseyShiitake](https://github.com/IsseyShiitake) in a fork and adopted here.
 
 Versions 1.3.0, 1.4.0, 1.4.1 and 1.4.2 were developed and verified on the live
 install but landed in a single commit together with 1.4.3, so only the states in
-the table are tagged.
+the table have their own commit.
 
 | version | where | date | headline |
 |---|---|---|---|
-| 1.0.0 | upstream `92a5c73` | 2026-10-06 | upstream base plugin |
-| 1.1.0 | tag `v1.1.0` | 2026-10-08 | fork: key arrangement, accent tint, review fixes |
-| 1.2.0 | tag `v1.2.0` | 2026-10-08 | finger-following 3F swipe, live settings, file-stream input |
-| 1.3.0 – 1.4.3 | tag `v1.4.3` | 2026-10-09 | all input on one stream, overview muting, alpha-correct previews |
-| 1.4.4 | tag `v1.4.4` | 2026-10-09 | wiring ships with the plugin, stream moves to `$XDG_RUNTIME_DIR` |
+| 1.0.0 | `92a5c73` | 2026-10-06 | base plugin |
+| 1.1.0 | `69795e9` | 2026-10-08 | key arrangement, accent tint, review fixes |
+| 1.2.0 | `25821ad` | 2026-10-08 | finger-following 3F swipe, live settings, file-stream input |
+| 1.3.0 – 1.4.3 | `e3abd92` | 2026-10-09 | all input on one stream, overview muting, alpha-correct previews |
+| 1.4.4 | `6619e28` | 2026-10-09 | wiring ships with the plugin, stream moves to `$XDG_RUNTIME_DIR` |
 
-## Implementations (new on top of upstream)
+## Implementations (new since 1.0.0)
 
 1. **Key arrangement, and it is a choice** (1.1.0; inverted in 1.3.0; switchable
    since 1.4.4) — the overview can be driven from `Super + Tab`, or from
@@ -69,7 +68,7 @@ the table are tagged.
 
 ## Bugfixes
 
-Defects in the upstream plugin or its dependencies. Fixes for problems the fork
+Defects in the 1.0.0 plugin or its dependencies. Fixes for problems the 1.1–1.4 work
 itself introduced during development are deliberately not part of this list; they
 are recorded in the commit messages.
 
@@ -77,24 +76,24 @@ are recorded in the commit messages.
    `buildWorkspaces` used `c.at[0]` and `c.size[0]` unguarded; such clients are
    now skipped instead of poisoning every card's geometry.
 2. **State-machine wedge on a failed query** (1.1.0, hardened in 1.4.2) —
-   upstream returned from `finishQuery` on a JSON parse failure and on an empty
+   1.0.0 returned from `finishQuery` on a JSON parse failure and on an empty
    workspace list without closing, and had no timeout at all, so a hung `hyprctl`
    left the switcher unable to open. Now it closes cleanly and a 2 s watchdog
    clears the query.
 3. **"Silent teleport" to another workspace** (1.1.0) — stale `commitPending` /
    `pendingSteps` from a cancelled open turned a later toggle into an immediate
    workspace switch; `toggle()` now clears them.
-4. **Junk `desktop` app-name key** (1.1.0) — upstream indexed desktop-entry ids
+4. **Junk `desktop` app-name key** (1.1.0) — 1.0.0 indexed desktop-entry ids
    with their `.desktop` suffix, which leaked into class lookups.
 5. **Wrong app names** (1.1.0) — reverse-DNS ids (`org.gimp.GIMP`) were not
    matched by bare class names, and `soffice.bin` was not recognised as
    LibreOffice.
 6. **Wrong terminal labels** (1.1.0) — shell-prompt sigils (`$`, `#`, `%`) and
    terminal-appended titles ("… — Konsole") were shown as window content.
-7. **Unload clobbered the user's own key bindings** (1.3.0) — upstream's
+7. **Unload clobbered the user's own key bindings** (1.3.0) — 1.0.0's
    `restoreScript` rewrote the machine's binds with Omarchy stock on unload; the
    whole runtime-takeover design it belonged to is gone.
-8. **Unreliable key delivery** (1.3.0) — upstream's mechanism depended on
+8. **Unreliable key delivery** (1.3.0) — 1.0.0's mechanism depended on
    quickshell 0.2.1 `GlobalShortcut`s, which silently drop per-instance subsets;
    input now rides the file stream, and the global shortcuts remain only as
    unbound secondary triggers.

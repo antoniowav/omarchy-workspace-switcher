@@ -1,5 +1,5 @@
 -- Omarchy Workspace Switcher - Hyprland wiring for the
--- io.github.antoniowav.workspace-switcher plugin (IsseyShiitake fork).
+-- io.github.antoniowav.workspace-switcher plugin.
 --
 -- One include is all the switcher needs on the Hyprland side. Put this in
 -- ~/.config/hypr/hyprland.lua (or an input.lua included from it):
